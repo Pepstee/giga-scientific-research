@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from scripts.analyze_skin_evidence import (
+from modules.research.scripts.analyze_skin_evidence import (
     deduplicate,
     identity_tokens,
     normalise_title,
