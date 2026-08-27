@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://giga-user.local/contracts/scientific-synthesis-signoff.v1.schema.json",
+  "title": "Human sign-off for a fixed scientific comparison matrix",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "comparison_matrix_sha256",
+    "human_verified",
+    "reviewed_by"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "giga.scientific-synthesis-signoff.v1"
+    },
+    "comparison_matrix_sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "human_verified": {
+      "const": true
+    },
+    "reviewed_by": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

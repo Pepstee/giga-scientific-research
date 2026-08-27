@@ -1,0 +1,48 @@
+{
+  "schema_version": "giga.scientific-search-campaign.v1",
+  "campaign_id": "reproducible-software-review-example",
+  "protocol": "examples/protocol.md",
+  "created_at": "2026-01-01T00:00:00Z",
+  "execution_state": "example_only",
+  "defaults": {
+    "endpoint": "search/papers",
+    "corpus": "pubmed",
+    "search_mode": "semantic",
+    "max_results": 25,
+    "filters": {
+      "retracted": "exclude_retracted"
+    }
+  },
+  "queries": [
+    {
+      "id": "P1-systematic-reviews",
+      "phase": 1,
+      "question": "Which systematic reviews evaluate reproducibility interventions in scientific software?",
+      "filters": {
+        "typeTags": ["Systematic Review", "Meta-Analysis"],
+        "retracted": "exclude_retracted"
+      }
+    },
+    {
+      "id": "P2-controlled-studies",
+      "phase": 2,
+      "question": "Which controlled studies evaluate testing, provenance, or reproducible-build practices for scientific software?",
+      "filters": {
+        "typeTags": ["RCT", "Longitudinal"],
+        "retracted": "exclude_retracted"
+      }
+    },
+    {
+      "id": "P3-failure-evidence",
+      "phase": 3,
+      "question": "What empirical evidence documents failure modes or unintended effects of reproducibility interventions?"
+    },
+    {
+      "id": "P4-active-trials",
+      "phase": 4,
+      "endpoint": "search/trials",
+      "question": "Which registered studies are prospectively evaluating reproducible scientific software workflows?"
+    }
+  ],
+  "completion_rule": "Stop after bounded acquisition and deterministic screening; human review remains required."
+}

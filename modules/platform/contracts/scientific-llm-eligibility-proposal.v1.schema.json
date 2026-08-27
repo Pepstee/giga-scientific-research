@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://giga.local/contracts/scientific-llm-eligibility-proposal.v1.schema.json",
+  "title": "Scientific LLM eligibility proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "campaign_id",
+    "group_id",
+    "decision",
+    "reason_code",
+    "rationale",
+    "evidence_spans",
+    "model",
+    "proposed_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "giga.scientific-llm-eligibility-proposal.v1"
+    },
+    "campaign_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "group_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "decision": {
+      "enum": ["include", "exclude", "uncertain"]
+    },
+    "reason_code": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,79}$"
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 10000
+    },
+    "evidence_spans": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "exact_text"],
+        "properties": {
+          "field": {
+            "enum": ["title", "abstract"]
+          },
+          "exact_text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 5000
+          }
+        }
+      }
+    },
+    "model": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "proposed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

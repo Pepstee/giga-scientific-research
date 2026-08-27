@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://giga-user.local/contracts/scientific-appraisal.v1.schema.json",
+  "title": "GIGA human-verified scientific source appraisal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_record_id",
+    "study_identity",
+    "study_design",
+    "human_verified",
+    "full_text_verified",
+    "risk_of_bias",
+    "population_applicability",
+    "harms_assessed",
+    "conflicts_assessed",
+    "retraction_status",
+    "effect_estimate",
+    "confidence_interval",
+    "outcome_direction",
+    "supporting_quote",
+    "source_locator",
+    "assessed_by",
+    "assessed_at",
+    "notes"
+  ],
+  "properties": {
+    "schema_version": {"const": "giga.scientific-appraisal.v1"},
+    "source_record_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "study_identity": {"type": "string", "minLength": 1},
+    "study_design": {
+      "enum": [
+        "clinical_guideline",
+        "systematic_review",
+        "meta_analysis",
+        "randomized_controlled_trial",
+        "nonrandomized_controlled",
+        "longitudinal",
+        "cohort",
+        "case_control",
+        "cross_sectional",
+        "case_series",
+        "mechanistic_human",
+        "animal",
+        "in_vitro",
+        "expert_opinion",
+        "other"
+      ]
+    },
+    "human_verified": {"type": "boolean"},
+    "full_text_verified": {"type": "boolean"},
+    "risk_of_bias": {
+      "enum": ["low", "some_concerns", "high", "critical", "unclear"]
+    },
+    "population_applicability": {
+      "enum": ["direct", "partial", "indirect", "unknown"]
+    },
+    "harms_assessed": {"type": "boolean"},
+    "conflicts_assessed": {"type": "boolean"},
+    "retraction_status": {
+      "enum": ["clear", "corrected", "retracted", "unknown"]
+    },
+    "effect_estimate": {"type": ["string", "null"]},
+    "confidence_interval": {"type": ["string", "null"]},
+    "outcome_direction": {
+      "enum": ["beneficial", "neutral", "harmful", "mixed", "unknown"]
+    },
+    "supporting_quote": {"type": ["string", "null"]},
+    "source_locator": {"type": ["string", "null"]},
+    "assessed_by": {"type": "string", "minLength": 1},
+    "assessed_at": {"type": "string", "format": "date-time"},
+    "notes": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "schema": "giga.research.standalone-module.v1",
+  "status": "standalone",
+  "canonical_source_root": "modules/research",
+  "core": [
+    "__init__.py",
+    "scientific_campaign.py",
+    "scientific_evidence.py",
+    "scientific_evidence_cli.py",
+    "scientific_fulltext.py",
+    "scientific_pipeline_cli.py",
+    "scientific_providers.py",
+    "scientific_query_compiler.py",
+    "scientific_readiness.py",
+    "scientific_review_funnel.py",
+    "scientific_review_state.py",
+    "scientific_saturation.py",
+    "scientific_screening.py"
+  ],
+  "scripts": [
+    "analyze_skin_evidence.py",
+    "elicit_evidence.py",
+    "run_elicit_campaign.py",
+    "run_scientific_campaign.py",
+    "scientific_evidence.py",
+    "scientific_pipeline.py"
+  ],
+  "tests": [
+    "test_analyze_skin_evidence.py",
+    "test_scientific_campaign.py",
+    "test_scientific_evidence.py",
+    "test_scientific_pipeline.py",
+    "test_scientific_providers.py",
+    "test_scientific_review_funnel.py"
+  ],
+  "private_evidence_included": false,
+  "example_campaign": "examples/systematic-review-campaign.json",
+  "platform_contracts": [
+    "modules/platform/contracts/scientific-action-candidate.v1.schema.json",
+    "modules/platform/contracts/scientific-appraisal.v1.schema.json",
+    "modules/platform/contracts/scientific-eligibility-decisions.v1.schema.json",
+    "modules/platform/contracts/scientific-llm-eligibility-proposal.v1.schema.json",
+    "modules/platform/contracts/scientific-search-ontology.v1.schema.json",
+    "modules/platform/contracts/scientific-study-extraction.v1.schema.json",
+    "modules/platform/contracts/scientific-synthesis-signoff.v1.schema.json"
+  ],
+  "compatibility": {
+    "python_package": "modules.research",
+    "python_launchers": [
+      "scripts/analyze_skin_evidence.py",
+      "scripts/elicit_evidence.py",
+      "scripts/run_elicit_campaign.py",
+      "scripts/run_scientific_campaign.py",
+      "scripts/scientific_evidence.py",
+      "scripts/scientific_pipeline.py"
+    ],
+    "retirement": "standalone compatibility launchers; remove only in a breaking release"
+  },
+  "provenance": {
+    "source_repository": "Pepstee/giga-user",
+    "source_branch": "codex/csq-cleanup-sequence",
+    "source_commit": "6f728169e526fa218a10561e4610f3fe72b04ac3"
+  },
+  "memory_authority": false,
+  "action_authority": false,
+  "promotion_authorized": false
+}
