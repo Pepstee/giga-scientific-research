@@ -253,12 +253,6 @@ def main(argv: list[str] | None = None) -> int:
             providers = tuple(args.providers or DEFAULT_FREE_PAPER_PROVIDERS)
             budget = store.require_acquisition_capacity(aggregate_databases)
             remaining = budget["remaining_records"]
-            clients = {
-                provider: (
-                    ElicitClient() if provider == "elicit" else create_paper_client(provider)
-                )
-                for provider in providers
-            }
             acquisitions: list[dict[str, Any]] = []
             providers_left = len(providers)
             for provider in providers:
@@ -278,6 +272,11 @@ def main(argv: list[str] | None = None) -> int:
                         }
                     )
                     continue
+                client = (
+                    ElicitClient()
+                    if provider == "elicit"
+                    else create_paper_client(provider)
+                )
                 if provider == "elicit":
                     expected_request = ElicitClient.paper_search_request(
                         args.query,
@@ -311,7 +310,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     continue
                 if provider == "elicit":
-                    request, response = clients[provider].search_papers(
+                    request, response = client.search_papers(
                         args.query,
                         max_results=max_results,
                         corpus=args.corpus,
@@ -319,7 +318,7 @@ def main(argv: list[str] | None = None) -> int:
                         filters=filters or None,
                     )
                 else:
-                    request, response = clients[provider].search_papers(
+                    request, response = client.search_papers(
                         args.query,
                         max_results=max_results,
                         filters=filters or None,
