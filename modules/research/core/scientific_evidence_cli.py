@@ -227,6 +227,14 @@ def main(argv: list[str] | None = None) -> int:
     store = ScientificEvidenceStore(args.database)
     aggregate_databases = tuple(args.aggregate_database)
     try:
+        if args.command in {"start-report", "start-review", "session"}:
+            budget = store.require_acquisition_capacity(aggregate_databases)
+            if budget["remaining_records"] < 1:
+                raise ScientificEvidenceError(
+                    "cumulative acquisition record cap "
+                    f"{MAX_CUMULATIVE_RECORDS} is exhausted; "
+                    "further remote acquisition refused"
+                )
         if args.command == "search-papers":
             filters: dict[str, Any] = {}
             if args.types:
