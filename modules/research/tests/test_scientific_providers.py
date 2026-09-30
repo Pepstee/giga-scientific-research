@@ -231,8 +231,7 @@ def test_clients_reject_nonofficial_hosts_and_missing_required_configuration(
     monkeypatch.delenv("SCIENTIFIC_CONTACT_EMAIL", raising=False)
     with pytest.raises(ScientificProviderConfigurationError, match="official"):
         EuropePMCClient(base_url="https://example.test/api")
-    with pytest.raises(ScientificProviderConfigurationError, match="OPENALEX_API_KEY"):
-        OpenAlexClient(api_key="")
+    assert OpenAlexClient(api_key="").api_key == ""
     with pytest.raises(ScientificProviderConfigurationError, match="UNPAYWALL_EMAIL"):
         UnpaywallClient(contact_email="")
 

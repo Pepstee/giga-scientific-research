@@ -738,11 +738,6 @@ class OpenAlexClient(_OfficialJSONClient):
     ):
         super().__init__(base_url=base_url, timeout=timeout, transport=transport)
         self.api_key = (api_key or os.environ.get("OPENALEX_API_KEY") or "").strip()
-        if not self.api_key:
-            raise ScientificProviderConfigurationError(
-                "OPENALEX_API_KEY is required; a free key is available from "
-                "https://openalex.org/settings/api"
-            )
 
     @staticmethod
     def paper_search_request(
@@ -750,7 +745,7 @@ class OpenAlexClient(_OfficialJSONClient):
         *,
         max_results: int = 100,
         filters: Mapping[str, Any] | None = None,
-        api_key_provided: bool = True,
+        api_key_provided: bool = False,
     ) -> dict[str, Any]:
         return _request_envelope(
             "openalex",
@@ -796,7 +791,7 @@ class OpenAlexClient(_OfficialJSONClient):
                     "page": page,
                     "select": select,
                     "filter": provider_filter,
-                    "api_key": self.api_key,
+                    "api_key": self.api_key or None,
                 },
                 secrets=(self.api_key,),
             )
