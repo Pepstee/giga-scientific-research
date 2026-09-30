@@ -24,6 +24,7 @@ from typing import Any, Callable, Iterator, Mapping, Sequence
 LEDGER_SCHEMA = "giga.scientific-ledger.v1"
 APPRAISAL_SCHEMA = "giga.scientific-appraisal.v1"
 CANDIDATE_SCHEMA = "giga.scientific-action-candidate.v1"
+MAX_CUMULATIVE_RECORDS = 20
 DEFAULT_DATABASE = Path.home() / ".giga" / "scientific-evidence.sqlite3"
 DEFAULT_ELICIT_BASE_URL = "https://elicit.com/api/v2"
 SHA256_PATTERN = frozenset("0123456789abcdef")
@@ -602,6 +603,78 @@ class ScientificEvidenceStore:
         self._initialise()
         os.chmod(self.database, 0o600)
 
+    def _acquisition_database_paths(
+        self, aggregate_databases: Sequence[Path] = ()
+    ) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for value in (self.database, *aggregate_databases):
+            try:
+                path = Path(value).expanduser().resolve(strict=True)
+            except OSError as exc:
+                raise ScientificEvidenceError(
+                    f"aggregate acquisition ledger is unavailable: {value}"
+                ) from exc
+            if not path.is_file():
+                raise ScientificEvidenceError(
+                    f"aggregate acquisition ledger is not a file: {path}"
+                )
+            if path not in seen:
+                seen.add(path)
+                paths.append(path)
+        return tuple(paths)
+
+    def _acquisition_state(
+        self, aggregate_databases: Sequence[Path] = ()
+    ) -> tuple[int, set[str]]:
+        source_records = 0
+        identities: set[str] = set()
+        for path in self._acquisition_database_paths(aggregate_databases):
+            try:
+                uri = f"{path.as_uri()}?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+                    rows = connection.execute(
+                        "SELECT identity_key FROM source_records"
+                    ).fetchall()
+            except sqlite3.Error as exc:
+                raise ScientificEvidenceError(
+                    f"cannot read aggregate acquisition ledger: {path}"
+                ) from exc
+            source_records += len(rows)
+            identities.update(row[0] for row in rows)
+        return source_records, identities
+
+    def acquisition_budget(
+        self, aggregate_databases: Sequence[Path] = ()
+    ) -> dict[str, int]:
+        source_records, identities = self._acquisition_state(aggregate_databases)
+        return {
+            "record_limit": MAX_CUMULATIVE_RECORDS,
+            "source_records": source_records,
+            "unique_identities": len(identities),
+            "remaining_records": max(0, MAX_CUMULATIVE_RECORDS - source_records),
+        }
+
+    def require_acquisition_capacity(
+        self, aggregate_databases: Sequence[Path] = ()
+    ) -> dict[str, int]:
+        budget = self.acquisition_budget(aggregate_databases)
+        if (
+            budget["source_records"] > MAX_CUMULATIVE_RECORDS
+            or budget["unique_identities"] > MAX_CUMULATIVE_RECORDS
+        ):
+            raise ScientificEvidenceError(
+                "cumulative acquisition record cap "
+                f"{MAX_CUMULATIVE_RECORDS} exceeded: existing aggregate has "
+                f"{budget['source_records']} source records / "
+                f"{budget['unique_identities']} unique identities "
+                f"({max(0, budget['source_records'] - MAX_CUMULATIVE_RECORDS)} "
+                "records and "
+                f"{max(0, budget['unique_identities'] - MAX_CUMULATIVE_RECORDS)} "
+                "identities over the cap); further acquisition refused"
+            )
+        return budget
+
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database, timeout=5)
@@ -763,7 +836,15 @@ class ScientificEvidenceStore:
         request: Mapping[str, Any],
         response: Mapping[str, Any],
         observed_at: str | None = None,
+        aggregate_databases: Sequence[Path] = (),
+        max_cumulative_records: int = MAX_CUMULATIVE_RECORDS,
     ) -> tuple[str, bool, list[str]]:
+        limit = _integer(
+            max_cumulative_records,
+            "max_cumulative_records",
+            minimum=0,
+            maximum=MAX_CUMULATIVE_RECORDS,
+        )
         provider_value = _enum(
             provider, "provider", ACQUISITION_PROVIDERS
         )
@@ -811,6 +892,25 @@ class ScientificEvidenceStore:
                     )
                 ]
                 return acquisition_id, False, source_ids
+            existing_records, existing_identities = self._acquisition_state(
+                aggregate_databases
+            )
+            added_identities = {
+                _source_identity(kind, record) for record in records
+            } - existing_identities
+            projected_records = existing_records + len(records)
+            projected_identities = len(existing_identities) + len(added_identities)
+            if records and (
+                projected_records > limit or projected_identities > limit
+            ):
+                raise ScientificEvidenceError(
+                    f"cumulative acquisition record cap {limit} would be exceeded: "
+                    f"existing aggregate has {existing_records} source records / "
+                    f"{len(existing_identities)} unique identities; response adds "
+                    f"{len(records)} records / {len(added_identities)} new identities, "
+                    f"projecting {projected_records} records / "
+                    f"{projected_identities} identities; acquisition not stored"
+                )
             connection.execute(
                 """INSERT INTO acquisitions
                    (id,provider,endpoint,request_json,request_sha256,response_json,
@@ -905,6 +1005,8 @@ class ScientificEvidenceStore:
         endpoint: str,
         request: Mapping[str, Any],
         provider: str = "elicit",
+        aggregate_databases: Sequence[Path] = (),
+        match_max_results: bool = True,
     ) -> list[str]:
         provider_value = _enum(provider, "provider", ACQUISITION_PROVIDERS)
         endpoint_value = _enum(endpoint, "endpoint", ACQUISITION_ENDPOINTS)
@@ -912,14 +1014,41 @@ class ScientificEvidenceStore:
             raise ScientificEvidenceError("request must be an object")
         _reject_secret_material(request)
         digest = payload_hash(dict(request))
-        with self.connect() as connection:
-            rows = connection.execute(
-                """SELECT id FROM acquisitions
-                   WHERE provider = ? AND endpoint = ? AND request_sha256 = ?
-                   ORDER BY observed_at, id""",
-                (provider_value, endpoint_value, digest),
-            ).fetchall()
-        return [row["id"] for row in rows]
+        comparable_request = dict(request)
+        comparable_request.pop("maxResults", None)
+        acquisition_ids: list[str] = []
+        for path in self._acquisition_database_paths(aggregate_databases):
+            try:
+                uri = f"{path.as_uri()}?mode=ro"
+                with sqlite3.connect(uri, uri=True, timeout=5) as connection:
+                    if match_max_results:
+                        rows = connection.execute(
+                            """SELECT id FROM acquisitions
+                               WHERE provider = ? AND endpoint = ? AND request_sha256 = ?
+                               ORDER BY observed_at, id""",
+                            (provider_value, endpoint_value, digest),
+                        ).fetchall()
+                        acquisition_ids.extend(row[0] for row in rows)
+                    else:
+                        rows = connection.execute(
+                            """SELECT id, request_json FROM acquisitions
+                               WHERE provider = ? AND endpoint = ?
+                               ORDER BY observed_at, id""",
+                            (provider_value, endpoint_value),
+                        ).fetchall()
+                        for row in rows:
+                            try:
+                                previous_request = json.loads(row[1])
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+                            previous_request.pop("maxResults", None)
+                            if previous_request == comparable_request:
+                                acquisition_ids.append(row[0])
+            except sqlite3.Error as exc:
+                raise ScientificEvidenceError(
+                    f"cannot read aggregate acquisition ledger: {path}"
+                ) from exc
+        return list(dict.fromkeys(acquisition_ids))
 
     def list_sources(self, *, limit: int = 100) -> list[dict[str, Any]]:
         maximum = _integer(limit, "limit", minimum=1, maximum=10_000)

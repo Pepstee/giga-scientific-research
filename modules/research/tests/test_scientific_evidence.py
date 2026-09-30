@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import stat
 import tempfile
@@ -196,6 +197,100 @@ def test_source_identity_and_raw_provider_response_are_preserved() -> None:
         assert source["raw"]["abstract"] == "An effect was estimated."
         assert len(source["raw_sha256"]) == 64
         assert store.audit()["ok"] is True
+
+
+def test_cumulative_record_cap_rejects_whole_response_without_breaking_audit(
+    tmp_path: Path,
+) -> None:
+    store = ScientificEvidenceStore(tmp_path / "cap" / "evidence.sqlite3")
+    first = [
+        {"title": f"Record {index}", "doi": f"10.1000/cap-{index}"}
+        for index in range(19)
+    ]
+    store.record_acquisition(
+        provider="europe_pmc",
+        endpoint="search/papers",
+        request={"query": "first", "maxResults": 19},
+        response={"papers": first},
+        observed_at=FIXED_TIME,
+    )
+    before = store.counts()
+    with pytest.raises(ScientificEvidenceError, match="would be exceeded"):
+        store.record_acquisition(
+            provider="openalex",
+            endpoint="search/papers",
+            request={"query": "second", "maxResults": 2},
+            response={
+                "papers": [
+                    {"title": "New 1", "doi": "10.1000/cap-new-1"},
+                    {"title": "New 2", "doi": "10.1000/cap-new-2"},
+                ]
+            },
+            observed_at=FIXED_TIME,
+        )
+    assert store.counts() == before
+    assert before["source_records"] == 19
+    assert store.audit()["ok"] is True
+
+
+def test_aggregate_cap_counts_preserved_rows_and_identities_across_ledgers(
+    tmp_path: Path,
+) -> None:
+    first_store = ScientificEvidenceStore(tmp_path / "run-a" / "evidence.sqlite3")
+    second_store = ScientificEvidenceStore(tmp_path / "run-b" / "evidence.sqlite3")
+    first_keys = [f"10.1000/aggregate-{index}" for index in range(19)]
+    second_keys = first_keys[:3] + [
+        f"10.1000/aggregate-{index}" for index in range(19, 34)
+    ]
+
+    def add_records(
+        store: ScientificEvidenceStore, query: str, dois: list[str]
+    ) -> None:
+        store.record_acquisition(
+            provider="europe_pmc",
+            endpoint="search/papers",
+            request={"query": query, "maxResults": len(dois)},
+            response={
+                "papers": [
+                    {"title": f"Record {doi}", "doi": doi} for doi in dois
+                ]
+            },
+            observed_at=FIXED_TIME,
+        )
+
+    add_records(first_store, "first ledger", first_keys)
+    add_records(second_store, "second ledger", second_keys)
+    first_hash = hashlib.sha256(first_store.database.read_bytes()).hexdigest()
+    second_hash = hashlib.sha256(second_store.database.read_bytes()).hexdigest()
+    current = ScientificEvidenceStore(tmp_path / "current" / "evidence.sqlite3")
+
+    budget = current.acquisition_budget(
+        (first_store.database, second_store.database)
+    )
+    assert budget["source_records"] == 37
+    assert budget["unique_identities"] == 34
+    with pytest.raises(
+        ScientificEvidenceError,
+        match="existing aggregate has 37 source records / 34 unique identities",
+    ):
+        current.require_acquisition_capacity(
+            (first_store.database, second_store.database)
+        )
+    with pytest.raises(ScientificEvidenceError, match="would be exceeded"):
+        current.record_acquisition(
+            provider="openalex",
+            endpoint="search/papers",
+            request={"query": "new", "maxResults": 1},
+            response={
+                "papers": [{"title": "New", "doi": "10.1000/aggregate-new"}]
+            },
+            observed_at=FIXED_TIME,
+            aggregate_databases=(first_store.database, second_store.database),
+        )
+
+    assert current.counts()["acquisitions"] == 0
+    assert hashlib.sha256(first_store.database.read_bytes()).hexdigest() == first_hash
+    assert hashlib.sha256(second_store.database.read_bytes()).hexdigest() == second_hash
 
 
 @pytest.mark.parametrize(

@@ -23,6 +23,7 @@ from modules.research.core.scientific_evidence import (
 from modules.research.core.scientific_providers import (
     ClinicalTrialsClient,
     EuropePMCClient,
+    paper_search_request,
 )
 
 
@@ -216,3 +217,150 @@ def test_provider_campaign_fans_out_and_replays_by_provider(tmp_path: Path) -> N
         result["status"] == "skipped_already_acquired"
         for result in second["results"]
     )
+
+
+def test_provider_campaign_caps_two_providers_and_resumes_without_reacquiring(
+    tmp_path: Path,
+) -> None:
+    payload = _campaign()
+    payload["defaults"]["max_results"] = 20
+    campaign = validate_campaign(payload)
+    selected = select_queries(campaign, phases=[1])
+    store = ScientificEvidenceStore(tmp_path / "private" / "capped.sqlite3")
+    calls: list[tuple[str, int]] = []
+
+    class FakePaperClient:
+        def __init__(self, provider: str) -> None:
+            self.provider = provider
+
+        def search_papers(
+            self, query: str, *, max_results: int, filters: dict | None = None
+        ) -> tuple[dict, dict]:
+            calls.append((self.provider, max_results))
+            request = paper_search_request(
+                self.provider,
+                query,
+                max_results=max_results,
+                filters=filters,
+            )
+            return request, {
+                "papers": [
+                    {
+                        "title": f"{self.provider} paper {index}",
+                        "doi": f"10.1000/{self.provider}-{index}",
+                    }
+                    for index in range(max_results)
+                ]
+            }
+
+    clients = {
+        provider: FakePaperClient(provider)
+        for provider in ("europe_pmc", "openalex")
+    }
+    plan = provider_campaign_plan(
+        campaign,
+        selected,
+        store,
+        paper_providers=tuple(clients),
+    )
+    assert plan["maximum_requested_records"] == 20
+    assert [job["budgeted_max_results"] for job in plan["jobs"]] == [10, 10]
+
+    first = execute_provider_campaign(
+        campaign,
+        selected,
+        store,
+        clients,
+        ClinicalTrialsClient(transport=lambda *args: {"studies": []}),
+        paper_providers=tuple(clients),
+    )
+    assert calls == [("europe_pmc", 10), ("openalex", 10)]
+    assert first["api_calls_made"] == 2
+    assert first["acquisition_budget"]["source_records"] == 20
+    assert first["acquisition_budget"]["unique_identities"] == 20
+    assert first["ledger_audit"]["ok"] is True
+
+    resumed = execute_provider_campaign(
+        campaign,
+        selected,
+        store,
+        clients,
+        ClinicalTrialsClient(transport=lambda *args: {"studies": []}),
+        paper_providers=tuple(clients),
+    )
+    assert all(
+        result["status"] == "skipped_already_acquired"
+        for result in resumed["results"]
+    )
+    assert resumed["api_calls_made"] == 0
+    assert len(calls) == 2
+
+    changed_payload = _campaign()
+    changed_payload["defaults"]["max_results"] = 20
+    changed_payload["queries"][0]["question"] = "a new bounded query"
+    changed_campaign = validate_campaign(changed_payload)
+    changed_selected = select_queries(changed_campaign, phases=[1])
+    exhausted = execute_provider_campaign(
+        changed_campaign,
+        changed_selected,
+        store,
+        clients,
+        ClinicalTrialsClient(transport=lambda *args: {"studies": []}),
+        paper_providers=tuple(clients),
+    )
+    assert all(
+        result["status"] == "skipped_record_budget_exhausted"
+        for result in exhausted["results"]
+    )
+    assert exhausted["api_calls_made"] == 0
+    assert len(calls) == 2
+
+
+def test_provider_campaign_refuses_over_cap_aggregate_before_provider_call(
+    tmp_path: Path,
+) -> None:
+    first_ledger = ScientificEvidenceStore(tmp_path / "first" / "evidence.sqlite3")
+    second_ledger = ScientificEvidenceStore(tmp_path / "second" / "evidence.sqlite3")
+    current_ledger = ScientificEvidenceStore(tmp_path / "current" / "evidence.sqlite3")
+
+    for store, query, start, count in (
+        (first_ledger, "first", 0, 11),
+        (second_ledger, "second", 11, 10),
+    ):
+        store.record_acquisition(
+            provider="europe_pmc",
+            endpoint="search/papers",
+            request={"query": query, "maxResults": count},
+            response={
+                "papers": [
+                    {
+                        "title": f"Record {index}",
+                        "doi": f"10.1000/over-cap-{index}",
+                    }
+                    for index in range(start, start + count)
+                ]
+            },
+        )
+
+    calls = 0
+
+    class NeverCalledClient:
+        def search_papers(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            raise AssertionError("provider call must be refused before execution")
+
+    campaign = validate_campaign(_campaign())
+    selected = select_queries(campaign, phases=[1])
+    with pytest.raises(ScientificEvidenceError, match="existing aggregate has 21"):
+        execute_provider_campaign(
+            campaign,
+            selected,
+            current_ledger,
+            {"europe_pmc": NeverCalledClient()},
+            ClinicalTrialsClient(transport=lambda *args: {"studies": []}),
+            paper_providers=("europe_pmc",),
+            aggregate_databases=(first_ledger.database, second_ledger.database),
+        )
+    assert calls == 0
+    assert current_ledger.counts()["acquisitions"] == 0

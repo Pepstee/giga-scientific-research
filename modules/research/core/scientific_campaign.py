@@ -8,6 +8,7 @@ from typing import Any, Mapping, Sequence
 
 from .scientific_evidence import (
     ElicitClient,
+    MAX_CUMULATIVE_RECORDS,
     ScientificEvidenceError,
     ScientificEvidenceStore,
     payload_hash,
@@ -385,6 +386,7 @@ def provider_campaign_plan(
     store: ScientificEvidenceStore,
     *,
     paper_providers: Sequence[str],
+    aggregate_databases: Sequence[Path] = (),
 ) -> dict[str, Any]:
     jobs = provider_campaign_jobs(
         selected,
@@ -396,6 +398,8 @@ def provider_campaign_plan(
             provider=job["provider"],
             endpoint=job["endpoint"],
             request=job["request"],
+            aggregate_databases=aggregate_databases,
+            match_max_results=False,
         )
         planned.append(
             {
@@ -406,8 +410,22 @@ def provider_campaign_plan(
                 "max_results": job["request"]["maxResults"],
                 "already_acquired": bool(prior),
                 "prior_acquisition_ids": prior,
+                "budgeted_max_results": 0,
             }
         )
+    budget = store.acquisition_budget(aggregate_databases)
+    remaining = budget["remaining_records"]
+    pending_count = sum(not job["already_acquired"] for job in planned)
+    maximum_requested_records = 0
+    for job in planned:
+        if job["already_acquired"]:
+            continue
+        quota = (remaining + pending_count - 1) // pending_count if pending_count else 0
+        allowed = min(job["max_results"], quota)
+        job["budgeted_max_results"] = allowed
+        maximum_requested_records += allowed
+        remaining -= allowed
+        pending_count -= 1
     return {
         "schema_version": CAMPAIGN_SCHEMA,
         "campaign_id": campaign["campaign_id"],
@@ -415,9 +433,8 @@ def provider_campaign_plan(
         "selected_queries": len(selected),
         "selected_provider_jobs": len(planned),
         "pending_provider_jobs": sum(not job["already_acquired"] for job in planned),
-        "maximum_requested_records": sum(
-            job["max_results"] for job in planned if not job["already_acquired"]
-        ),
+        "maximum_requested_records": maximum_requested_records,
+        "acquisition_budget": budget,
         "jobs": planned,
     }
 
@@ -431,6 +448,7 @@ def execute_provider_campaign(
     *,
     paper_providers: Sequence[str],
     refresh: bool = False,
+    aggregate_databases: Sequence[Path] = (),
 ) -> dict[str, Any]:
     """Execute a provider-expanded campaign without granting provider authority."""
     jobs = provider_campaign_jobs(
@@ -449,13 +467,23 @@ def execute_provider_campaign(
         raise ScientificEvidenceError(
             f"missing configured paper client(s): {missing}"
         )
-    results: list[dict[str, Any]] = []
-    for job in jobs:
-        prior = store.acquisitions_for_request(
-            provider=job["provider"],
-            endpoint=job["endpoint"],
-            request=job["request"],
+    job_priors = [
+        (
+            job,
+            store.acquisitions_for_request(
+                provider=job["provider"],
+                endpoint=job["endpoint"],
+                request=job["request"],
+                aggregate_databases=aggregate_databases,
+                match_max_results=False,
+            ),
         )
+        for job in jobs
+    ]
+    if any(not prior or refresh for _, prior in job_priors):
+        store.require_acquisition_capacity(aggregate_databases)
+    results: list[dict[str, Any]] = []
+    for index, (job, prior) in enumerate(job_priors):
         if prior and not refresh:
             results.append(
                 {
@@ -466,7 +494,30 @@ def execute_provider_campaign(
                 }
             )
             continue
-        request = job["request"]
+        budget = store.acquisition_budget(aggregate_databases)
+        remaining = budget["remaining_records"]
+        pending_count = sum(
+            1
+            for _, later_prior in job_priors[index:]
+            if refresh or not later_prior
+        )
+        quota = (
+            (remaining + pending_count - 1) // pending_count
+            if remaining and pending_count
+            else 0
+        )
+        request = dict(job["request"])
+        request["maxResults"] = min(request["maxResults"], quota)
+        if request["maxResults"] < 1:
+            results.append(
+                {
+                    "id": job["id"],
+                    "provider": job["provider"],
+                    "status": "skipped_record_budget_exhausted",
+                    "acquisition_ids": [],
+                }
+            )
+            continue
         if job["endpoint"] == "search/trials":
             actual_request, response = trial_client.search_trials(
                 request["query"],
@@ -488,6 +539,8 @@ def execute_provider_campaign(
             endpoint=job["endpoint"],
             request=actual_request,
             response=response,
+            aggregate_databases=aggregate_databases,
+            max_cumulative_records=MAX_CUMULATIVE_RECORDS,
         )
         results.append(
             {
@@ -496,6 +549,7 @@ def execute_provider_campaign(
                 "status": "acquired" if created else "exact_replay",
                 "acquisition_ids": [acquisition_id],
                 "source_record_ids": source_ids,
+                "requested_max_results": request["maxResults"],
             }
         )
     return {
@@ -504,5 +558,9 @@ def execute_provider_campaign(
         "campaign_sha256": payload_hash(campaign),
         "completed_at": utc_now(),
         "results": results,
+        "acquisition_budget": store.acquisition_budget(aggregate_databases),
+        "api_calls_made": sum(
+            result["status"] in {"acquired", "exact_replay"} for result in results
+        ),
         "ledger_audit": store.audit(),
     }

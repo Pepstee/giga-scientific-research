@@ -8,13 +8,14 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .scientific_evidence import (
     APPRAISAL_SCHEMA,
     DEFAULT_DATABASE,
     ElicitAPIError,
     ElicitClient,
+    MAX_CUMULATIVE_RECORDS,
     ScientificEvidenceError,
     ScientificEvidenceStore,
 )
@@ -27,6 +28,7 @@ from .scientific_providers import (
     ScientificProviderConfigurationError,
     create_doi_client,
     create_paper_client,
+    paper_search_request,
 )
 
 
@@ -49,6 +51,13 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     result.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    result.add_argument(
+        "--aggregate-database",
+        action="append",
+        type=Path,
+        default=[],
+        help="include another existing acquisition ledger in the cumulative 20-record cap",
+    )
     sub = result.add_subparsers(dest="command", required=True)
 
     search = sub.add_parser(
@@ -194,12 +203,16 @@ def _record(
     endpoint: str,
     request: Mapping[str, Any],
     response: Mapping[str, Any],
+    *,
+    aggregate_databases: Sequence[Path] = (),
 ) -> dict[str, Any]:
     acquisition_id, created, source_ids = store.record_acquisition(
         provider=provider,
         endpoint=endpoint,
         request=request,
         response=response,
+        aggregate_databases=aggregate_databases,
+        max_cumulative_records=MAX_CUMULATIVE_RECORDS,
     )
     return {
         "acquisition_id": acquisition_id,
@@ -212,6 +225,7 @@ def _record(
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     store = ScientificEvidenceStore(args.database)
+    aggregate_databases = tuple(args.aggregate_database)
     try:
         if args.command == "search-papers":
             filters: dict[str, Any] = {}
@@ -229,6 +243,8 @@ def main(argv: list[str] | None = None) -> int:
             if args.pubmed_only:
                 filters["pubmedOnly"] = True
             providers = tuple(args.providers or DEFAULT_FREE_PAPER_PROVIDERS)
+            budget = store.require_acquisition_capacity(aggregate_databases)
+            remaining = budget["remaining_records"]
             clients = {
                 provider: (
                     ElicitClient() if provider == "elicit" else create_paper_client(provider)
@@ -236,11 +252,60 @@ def main(argv: list[str] | None = None) -> int:
                 for provider in providers
             }
             acquisitions: list[dict[str, Any]] = []
+            providers_left = len(providers)
             for provider in providers:
+                quota = (
+                    (remaining + providers_left - 1) // providers_left
+                    if remaining and providers_left
+                    else 0
+                )
+                max_results = min(args.max_results, quota)
+                providers_left -= 1
+                if max_results < 1:
+                    acquisitions.append(
+                        {
+                            "provider": provider,
+                            "status": "skipped_record_budget_exhausted",
+                            "source_count": 0,
+                        }
+                    )
+                    continue
+                if provider == "elicit":
+                    expected_request = ElicitClient.paper_search_request(
+                        args.query,
+                        max_results=max_results,
+                        corpus=args.corpus,
+                        search_mode=args.search_mode,
+                        filters=filters or None,
+                    )
+                else:
+                    expected_request = paper_search_request(
+                        provider,
+                        args.query,
+                        max_results=max_results,
+                        filters=filters or None,
+                    )
+                prior = store.acquisitions_for_request(
+                    provider=provider,
+                    endpoint="search/papers",
+                    request=expected_request,
+                    aggregate_databases=aggregate_databases,
+                    match_max_results=False,
+                )
+                if prior:
+                    acquisitions.append(
+                        {
+                            "provider": provider,
+                            "status": "skipped_already_acquired",
+                            "acquisition_ids": prior,
+                            "source_count": 0,
+                        }
+                    )
+                    continue
                 if provider == "elicit":
                     request, response = clients[provider].search_papers(
                         args.query,
-                        max_results=args.max_results,
+                        max_results=max_results,
                         corpus=args.corpus,
                         search_mode=args.search_mode,
                         filters=filters or None,
@@ -248,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
                 else:
                     request, response = clients[provider].search_papers(
                         args.query,
-                        max_results=args.max_results,
+                        max_results=max_results,
                         filters=filters or None,
                     )
                 acquisitions.append(
@@ -260,13 +325,24 @@ def main(argv: list[str] | None = None) -> int:
                             "search/papers",
                             request,
                             response,
+                            aggregate_databases=aggregate_databases,
                         ),
                     }
                 )
+                remaining = store.acquisition_budget(
+                    aggregate_databases
+                )["remaining_records"]
             output = {"acquisitions": acquisitions}
         elif args.command == "search-trials":
+            budget = store.require_acquisition_capacity(aggregate_databases)
+            max_results = min(args.max_results, budget["remaining_records"])
+            if max_results < 1:
+                raise ScientificEvidenceError(
+                    "cumulative acquisition record cap "
+                    f"{MAX_CUMULATIVE_RECORDS} is exhausted; further acquisition refused"
+                )
             request, response = ClinicalTrialsClient().search_trials(
-                args.query, max_results=args.max_results
+                args.query, max_results=max_results
             )
             output = _record(
                 store,
@@ -274,6 +350,7 @@ def main(argv: list[str] | None = None) -> int:
                 "search/trials",
                 request,
                 response,
+                aggregate_databases=aggregate_databases,
             )
         elif args.command == "start-report":
             request, response = ElicitClient().create_report(
@@ -282,7 +359,14 @@ def main(argv: list[str] | None = None) -> int:
                 max_extract_papers=args.max_extract_papers,
                 is_public=False,
             )
-            output = _record(store, "elicit", "reports", request, response)
+            output = _record(
+                store,
+                "elicit",
+                "reports",
+                request,
+                response,
+                aggregate_databases=aggregate_databases,
+            )
         elif args.command == "start-review":
             request, response = ElicitClient().create_systematic_review(
                 _json_file(args.protocol)
@@ -293,6 +377,7 @@ def main(argv: list[str] | None = None) -> int:
                 "systematic-reviews",
                 request,
                 response,
+                aggregate_databases=aggregate_databases,
             )
         elif args.command == "session":
             response = ElicitClient().get_session(
@@ -304,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
                 "session",
                 {"sessionId": args.session_id, "systematic": args.systematic},
                 response,
+                aggregate_databases=aggregate_databases,
             )
         elif args.command == "import-response":
             acquisition_id, created, source_ids = store.record_acquisition(
@@ -312,6 +398,8 @@ def main(argv: list[str] | None = None) -> int:
                 request=_json_file(args.request),
                 response=_json_file(args.response),
                 observed_at=args.observed_at,
+                aggregate_databases=aggregate_databases,
+                max_cumulative_records=MAX_CUMULATIVE_RECORDS,
             )
             output = {
                 "acquisition_id": acquisition_id,
@@ -319,6 +407,8 @@ def main(argv: list[str] | None = None) -> int:
                 "source_record_ids": source_ids,
             }
         elif args.command == "lookup-doi":
+            budget = store.require_acquisition_capacity(aggregate_databases)
+            remaining = budget["remaining_records"]
             if args.providers:
                 providers = tuple(args.providers)
                 omitted: list[str] = []
@@ -336,6 +426,15 @@ def main(argv: list[str] | None = None) -> int:
             }
             acquisitions = []
             for provider in providers:
+                if remaining < 1:
+                    acquisitions.append(
+                        {
+                            "provider": provider,
+                            "status": "skipped_record_budget_exhausted",
+                            "source_count": 0,
+                        }
+                    )
+                    continue
                 request, response = clients[provider].lookup_doi(args.doi)
                 acquisitions.append(
                     {
@@ -346,9 +445,13 @@ def main(argv: list[str] | None = None) -> int:
                             "lookup/doi",
                             request,
                             response,
+                            aggregate_databases=aggregate_databases,
                         ),
                     }
                 )
+                remaining = store.acquisition_budget(
+                    aggregate_databases
+                )["remaining_records"]
             output = {
                 "acquisitions": acquisitions,
                 "providers_not_run": omitted,
@@ -392,6 +495,7 @@ def main(argv: list[str] | None = None) -> int:
                 "import/local-document",
                 request,
                 response,
+                aggregate_databases=aggregate_databases,
             )
         elif args.command == "appraise":
             appraisal_id, created, tier = store.record_appraisal(_json_file(args.file))

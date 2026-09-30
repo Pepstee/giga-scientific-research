@@ -35,6 +35,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("campaign", type=Path)
     parser.add_argument("--database", type=Path, default=DEFAULT_DATABASE)
+    parser.add_argument(
+        "--aggregate-database",
+        action="append",
+        type=Path,
+        default=[],
+        help="include another existing acquisition ledger in the cumulative 20-record cap",
+    )
     parser.add_argument("--phase", type=int, action="append", dest="phases")
     parser.add_argument("--query-id", action="append", dest="query_ids")
     parser.add_argument("--max-requests", type=int)
@@ -80,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
                 ClinicalTrialsClient(),
                 paper_providers=providers,
                 refresh=args.refresh,
+                aggregate_databases=args.aggregate_database,
             )
         else:
             if args.refresh:
@@ -93,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                     selected,
                     store,
                     paper_providers=providers,
+                    aggregate_databases=args.aggregate_database,
                 ),
             }
         print(json.dumps(output, indent=2, ensure_ascii=False))
