@@ -98,6 +98,51 @@ def _sha(value: Any, field: str) -> str:
     return result
 
 
+def _verified_group_payload_sha256(
+    source_metadata: Mapping[str, Any],
+    *,
+    expected_group_id: str,
+    recorded_sha256: str,
+) -> str:
+    source_group_id = _sha(
+        source_metadata.get("group_id"), "source_metadata.group_id"
+    )
+    if source_group_id != expected_group_id:
+        raise ScientificEvidenceError(
+            "source_metadata group_id does not match the awaiting_review group"
+        )
+    supplied_sha256 = _sha(
+        source_metadata.get("group_payload_sha256"),
+        "source_metadata.group_payload_sha256",
+    )
+    if supplied_sha256 != recorded_sha256:
+        raise ScientificEvidenceError(
+            "source_metadata group payload digest does not match the recorded group evidence"
+        )
+
+    material = dict(source_metadata)
+    material.pop("group_payload_sha256", None)
+    derived_fields = (
+        "screening_priority",
+        "priority_reason_codes",
+    )
+    for mask in range(1 << len(derived_fields)):
+        candidate = dict(material)
+        for index, field in enumerate(derived_fields):
+            if mask & (1 << index):
+                candidate.pop(field, None)
+        try:
+            candidate_sha256 = payload_hash(candidate)
+        except (TypeError, ValueError):
+            continue
+        if candidate_sha256 == recorded_sha256:
+            return recorded_sha256
+    raise ScientificEvidenceError(
+        "source_metadata must include the full source group payload matching "
+        "the recorded group evidence; title/abstract alone are insufficient"
+    )
+
+
 def _reason_codes(value: Any) -> list[str]:
     if not isinstance(value, list) or not value:
         raise ScientificEvidenceError("reason_codes must be a non-empty array")
@@ -360,6 +405,10 @@ class ScientificReviewStore:
             )
         campaign = _text(proposal["campaign_id"], "campaign_id", maximum=200)
         group = _sha(proposal["group_id"], "group_id")
+        if not isinstance(source_metadata, Mapping):
+            raise ScientificEvidenceError(
+                "source_metadata must be the full source group payload"
+            )
         decision = proposal["decision"]
         if decision not in {"include", "exclude", "uncertain"}:
             raise ScientificEvidenceError(
@@ -398,36 +447,80 @@ class ScientificReviewStore:
                     f"LLM evidence span is not verbatim in source {field}"
                 )
             clean_spans.append({"field": field, "exact_text": exact})
-        clean = {
-            "schema_version": LLM_PROPOSAL_SCHEMA,
-            "campaign_id": campaign,
-            "group_id": group,
-            "decision": decision,
-            "reason_code": reason,
-            "rationale": _text(
-                proposal["rationale"], "rationale", maximum=10_000
-            ),
-            "evidence_spans": clean_spans,
-            "model": _text(proposal["model"], "model", maximum=200),
-            "proposed_at": _timestamp(proposal["proposed_at"], "proposed_at"),
-            "proposal_only": True,
-            "human_confirmation_required": True,
-            "state_authority": False,
-        }
-        digest = payload_hash(clean)
-        proposal_id = payload_hash(
-            {
-                "campaign_id": campaign,
-                "group_id": group,
-                "proposal_sha256": digest,
-            }
-        )
+        rationale = _text(proposal["rationale"], "rationale", maximum=10_000)
+        model = _text(proposal["model"], "model", maximum=200)
+        proposed_at = _timestamp(proposal["proposed_at"], "proposed_at")
         with self.connect() as connection:
             current = self._current_state(connection, campaign, group)
             if current != "awaiting_review":
                 raise ScientificEvidenceError(
                     "LLM proposals are accepted only for awaiting_review records"
                 )
+            triaged = connection.execute(
+                """
+                SELECT evidence_json,evidence_sha256 FROM review_events
+                WHERE campaign_id=? AND group_id=? AND to_state='triaged'
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (campaign, group),
+            ).fetchone()
+            if triaged is None:
+                raise ScientificEvidenceError(
+                    "awaiting_review record has no stored source group binding; "
+                    "a verifiable screening group payload is required"
+                )
+            try:
+                triaged_evidence = json.loads(triaged["evidence_json"])
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ScientificEvidenceError(
+                    "stored source group binding is invalid"
+                ) from exc
+            if (
+                not isinstance(triaged_evidence, Mapping)
+                or payload_hash(triaged_evidence) != triaged["evidence_sha256"]
+            ):
+                raise ScientificEvidenceError(
+                    "stored source group binding failed its evidence hash check"
+                )
+            recorded_group_sha256 = triaged_evidence.get(
+                "group_payload_sha256"
+            )
+            if recorded_group_sha256 is None:
+                raise ScientificEvidenceError(
+                    "awaiting_review record has no stored source group digest; "
+                    "re-ingest a verifiable screening snapshot before proposing"
+                )
+            recorded_group_sha256 = _sha(
+                recorded_group_sha256, "recorded group_payload_sha256"
+            )
+            verified_source_sha256 = _verified_group_payload_sha256(
+                source_metadata,
+                expected_group_id=group,
+                recorded_sha256=recorded_group_sha256,
+            )
+            clean = {
+                "schema_version": LLM_PROPOSAL_SCHEMA,
+                "campaign_id": campaign,
+                "group_id": group,
+                "decision": decision,
+                "reason_code": reason,
+                "rationale": rationale,
+                "evidence_spans": clean_spans,
+                "model": model,
+                "proposed_at": proposed_at,
+                "source_group_payload_sha256": verified_source_sha256,
+                "proposal_only": True,
+                "human_confirmation_required": True,
+                "state_authority": False,
+            }
+            digest = payload_hash(clean)
+            proposal_id = payload_hash(
+                {
+                    "campaign_id": campaign,
+                    "group_id": group,
+                    "proposal_sha256": digest,
+                }
+            )
             existing = connection.execute(
                 "SELECT id FROM llm_proposals WHERE id=?",
                 (proposal_id,),

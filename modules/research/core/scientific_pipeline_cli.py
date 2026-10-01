@@ -600,7 +600,15 @@ def build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--recorded-at")
     llm = state_sub.add_parser("llm-proposal")
     llm.add_argument("proposal", type=Path)
-    llm.add_argument("source_metadata", type=Path)
+    llm.add_argument(
+        "source_metadata",
+        type=Path,
+        help=(
+            "full source group JSON from DEDUP_GROUPS.jsonl or "
+            "ENRICHED_GROUPS.jsonl, including group_id and "
+            "group_payload_sha256"
+        ),
+    )
     fulltext_plan = state_sub.add_parser("fulltext-plan")
     fulltext_plan.add_argument("campaign_id")
     fulltext_plan.add_argument("group_id")

@@ -26,6 +26,7 @@ from modules.research.core.scientific_readiness import assess_screening_readines
 from modules.research.core.scientific_review_state import (
     LLM_PROPOSAL_SCHEMA,
     ScientificReviewStore,
+    ingest_screening_snapshot,
 )
 from modules.research.core.scientific_saturation import evaluate_saturation
 from modules.research.core.scientific_screening import (
@@ -45,6 +46,43 @@ from modules.research.core.scientific_screening import (
 
 
 FIXED_TIME = "2026-07-28T18:00:00+00:00"
+
+
+def _bound_source_group(tag: str, title: str, abstract: str) -> dict:
+    source_record_ids = [f"synthetic-source-{tag}"]
+    canonical_identity = f"title-year:{normalise_title(title)}:2020"
+    group = {
+        "group_id": payload_hash(
+            {
+                "canonical_identity": canonical_identity,
+                "source_record_ids": source_record_ids,
+            }
+        ),
+        "canonical_identity": canonical_identity,
+        "title": title,
+        "normalised_title": normalise_title(title),
+        "abstract": abstract,
+        "year": 2020,
+        "doi": None,
+        "pmid": None,
+        "pmcid": None,
+        "nct_id": None,
+        "authors": [],
+        "providers": ["openalex"],
+        "query_ids": ["synthetic-query"],
+        "negative_control": False,
+        "compiled_query_retrieval": False,
+        "publication_types": [],
+        "urls": [f"https://example.invalid/{tag}"],
+        "open_access_candidate": False,
+        "retracted": False,
+        "source_record_ids": source_record_ids,
+        "retrieval_record_count": 1,
+        "preferred_source_record_id": source_record_ids[0],
+        "identifier_sets": {key: [] for key in ("doi", "pmid", "pmcid", "nct_id")},
+    }
+    group["group_payload_sha256"] = payload_hash(group)
+    return group
 
 
 def _ontology() -> dict:
@@ -578,7 +616,12 @@ def test_duplicate_decision_is_append_only_and_conflicts_fail(tmp_path: Path) ->
 
 def test_llm_proposal_never_changes_state_and_requires_verbatim_span(tmp_path: Path) -> None:
     store = ScientificReviewStore(tmp_path / "review.sqlite3")
-    group = "2" * 64
+    source_metadata = _bound_source_group(
+        "legacy",
+        "Microneedling for atrophic acne scars",
+        "A synthetic study of microneedling for atrophic acne scars.",
+    )
+    group = source_metadata["group_id"]
     for from_state, to_state, reason in (
         (None, "discovered", "DISCOVERED_TEST"),
         ("discovered", "triaged", "TRIAGED_TEST"),
@@ -591,7 +634,15 @@ def test_llm_proposal_never_changes_state_and_requires_verbatim_span(tmp_path: P
             to_state=to_state,
             actor_kind="deterministic",
             reason_codes=[reason],
-            evidence={"source": "fixture", "step": to_state},
+            evidence={
+                "source": "fixture",
+                "step": to_state,
+                **(
+                    {"group_payload_sha256": source_metadata["group_payload_sha256"]}
+                    if to_state == "triaged"
+                    else {}
+                ),
+            },
             recorded_at=FIXED_TIME,
         )
     proposal = {
@@ -609,10 +660,7 @@ def test_llm_proposal_never_changes_state_and_requires_verbatim_span(tmp_path: P
     }
     store.record_llm_proposal(
         proposal,
-        source_metadata={
-            "title": "Microneedling for atrophic acne scars",
-            "abstract": None,
-        },
+        source_metadata=source_metadata,
     )
     assert store.current_states("campaign")[group] == "awaiting_review"
     assert store.counts("campaign")["llm_proposals"] == 1
@@ -622,6 +670,147 @@ def test_llm_proposal_never_changes_state_and_requires_verbatim_span(tmp_path: P
             bad,
             source_metadata={"title": "Microneedling", "abstract": None},
         )
+
+
+def test_llm_proposal_binds_spans_to_full_recorded_group_payload(
+    tmp_path: Path,
+) -> None:
+    store = ScientificReviewStore(tmp_path / "review.sqlite3")
+    group_a = _bound_source_group(
+        "A",
+        "Synthetic solar-cell efficiency record A",
+        "Synthetic abstract A reports tandem efficiency evidence.",
+    )
+    group_b = _bound_source_group(
+        "B",
+        "Synthetic solar-cell stability record B",
+        "Synthetic abstract B reports unrelated stability evidence.",
+    )
+    group_c = _bound_source_group(
+        "C",
+        "Synthetic enriched solar-cell record C",
+        "Synthetic abstract C reports measured durability evidence.",
+    )
+    group_c.pop("group_payload_sha256")
+    group_c["abstract_enrichment"] = {
+        "provider": "synthetic",
+        "pmid": "synthetic-c",
+        "retrieval_sha256": "c" * 64,
+        "abstract_sha256": "d" * 64,
+        "authority": "eligibility_metadata_only",
+    }
+    group_c["screening_priority"] = 1
+    group_c["priority_reason_codes"] = ["MANUAL_REVIEW_TEST"]
+    group_c["group_payload_sha256"] = payload_hash(group_c)
+    groups = [group_a, group_b, group_c]
+    ingest_screening_snapshot(
+        store,
+        campaign_id="campaign",
+        groups=groups,
+        proposals=[
+            {
+                "group_id": group["group_id"],
+                "proposed_status": "manual_review",
+                "reason_codes": ["MANUAL_REVIEW_TEST"],
+                "proposal_sha256": payload_hash({"group_id": group["group_id"]}),
+            }
+            for group in groups
+        ],
+        snapshot_sha256="a" * 64,
+        recorded_at=FIXED_TIME,
+    )
+    proposal = {
+        "schema_version": LLM_PROPOSAL_SCHEMA,
+        "campaign_id": "campaign",
+        "group_id": group_a["group_id"],
+        "decision": "include",
+        "reason_code": "LLM_RELEVANT",
+        "rationale": "A synthetic public abstract supports a review proposal.",
+        "evidence_spans": [
+            {"field": "abstract", "exact_text": "tandem efficiency evidence"}
+        ],
+        "model": "test-model",
+        "proposed_at": FIXED_TIME,
+    }
+
+    with pytest.raises(ScientificEvidenceError, match="group_id"):
+        store.record_llm_proposal(
+            {**proposal, "evidence_spans": [
+                {"field": "abstract", "exact_text": "unrelated stability evidence"}
+            ]},
+            source_metadata=group_b,
+        )
+
+    copied_digest_and_swapped_payload = {
+        **group_b,
+        "group_id": group_a["group_id"],
+        "group_payload_sha256": group_a["group_payload_sha256"],
+    }
+    with pytest.raises(ScientificEvidenceError, match="full source group payload"):
+        store.record_llm_proposal(
+            {**proposal, "evidence_spans": [
+                {"field": "abstract", "exact_text": "unrelated stability evidence"}
+            ]},
+            source_metadata=copied_digest_and_swapped_payload,
+        )
+
+    missing_digest = {
+        key: value
+        for key, value in group_a.items()
+        if key != "group_payload_sha256"
+    }
+    with pytest.raises(
+        ScientificEvidenceError, match="source_metadata.group_payload_sha256"
+    ):
+        store.record_llm_proposal(proposal, source_metadata=missing_digest)
+
+    with pytest.raises(ScientificEvidenceError, match="source_metadata.group_id"):
+        store.record_llm_proposal(
+            proposal,
+            source_metadata={"title": group_a["title"], "abstract": group_a["abstract"]},
+        )
+
+    # Older screening groups hash before these derived queue annotations are added.
+    legacy_full_group = {
+        **group_a,
+        "screening_priority": 2,
+        "priority_reason_codes": ["MANUAL_REVIEW_TEST"],
+    }
+    _, created = store.record_llm_proposal(
+        proposal,
+        source_metadata=legacy_full_group,
+    )
+    assert created is True
+    enriched_proposal = {
+        **proposal,
+        "group_id": group_c["group_id"],
+        "evidence_spans": [
+            {"field": "abstract", "exact_text": "measured durability evidence"}
+        ],
+    }
+    _, enriched_created = store.record_llm_proposal(
+        enriched_proposal,
+        source_metadata=group_c,
+    )
+    assert enriched_created is True
+    assert store.current_states("campaign") == {
+        group_a["group_id"]: "awaiting_review",
+        group_b["group_id"]: "awaiting_review",
+        group_c["group_id"]: "awaiting_review",
+    }
+    assert store.counts("campaign")["llm_proposals"] == 2
+    with store.connect() as connection:
+        rows = connection.execute(
+            "SELECT proposal_json,human_confirmed,state_authority "
+            "FROM llm_proposals ORDER BY group_id"
+        ).fetchall()
+    stored_proposals = [json.loads(row["proposal_json"]) for row in rows]
+    assert {
+        item["source_group_payload_sha256"] for item in stored_proposals
+    } == {group_a["group_payload_sha256"], group_c["group_payload_sha256"]}
+    assert all(row["human_confirmed"] == 0 for row in rows)
+    assert all(row["state_authority"] == 0 for row in rows)
+    assert store.audit()["ok"] is True
 
 
 def test_review_ledger_audit_detects_out_of_band_mutation(tmp_path: Path) -> None:
