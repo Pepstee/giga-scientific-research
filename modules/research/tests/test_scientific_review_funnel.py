@@ -20,6 +20,7 @@ from modules.research.core.scientific_review_funnel import (
     validate_study_extraction,
     write_pubmed_abstract_queue,
 )
+from modules.research.core.scientific_screening import apply_duplicate_decisions
 
 
 FIXED_TIME = "2026-07-29T12:00:00+00:00"
@@ -324,10 +325,89 @@ def test_duplicate_gate_rejects_unhashed_assertion(tmp_path: Path) -> None:
             "candidate_pairs": 0,
             "complete": True,
             "unresolved_pairs": 0,
-            "report_sha256": "0" * 64,
         },
     )
     assert report["gates"]["duplicate_decisions_complete"] is False
+
+
+def test_zero_pairs_duplicate_report_opens_only_duplicate_gate(
+    tmp_path: Path,
+) -> None:
+    group = _group("a", abstract="Human randomized trial.")
+    _groups, _pairs, first = apply_duplicate_decisions(
+        [[group]], [group], [], None, campaign_id="test"
+    )
+    _groups, _pairs, second = apply_duplicate_decisions(
+        [[group]], [group], [], None, campaign_id="test"
+    )
+    assert first == second
+    assert first["human_verified"] is False
+    assert first["decisions_recorded"] == 0
+    assert first["report_sha256"] == payload_hash(
+        {key: value for key, value in first.items() if key != "report_sha256"}
+    )
+    funnel = build_review_funnel(
+        groups=[group],
+        proposals=[_proposal(group, "auto_include")],
+        features=[_feature(group)],
+        output=tmp_path,
+        duplicate_decision_report=first,
+    )
+    assert funnel["gates"]["duplicate_decisions_complete"] is True
+    assert "eligibility_decisions_complete" in funnel["failed_gates"]
+    assert funnel["scientific_synthesis_ready"] is False
+    assert funnel["effectiveness_ranking_authorised"] is False
+    assert funnel["recommendation_authority"] is False
+    decisions, unresolved = validate_eligibility_decisions(None, [group])
+    assert decisions == {}
+    assert unresolved == [group["group_id"]]
+    tampered = dict(first)
+    tampered["decisions_recorded"] = 1
+    rejected = build_review_funnel(
+        groups=[group],
+        proposals=[_proposal(group, "auto_include")],
+        features=[_feature(group)],
+        output=tmp_path,
+        duplicate_decision_report=tampered,
+    )
+    assert rejected["gates"]["duplicate_decisions_complete"] is False
+
+
+def test_unresolved_pairs_keep_duplicate_gate_closed_with_valid_hash(
+    tmp_path: Path,
+) -> None:
+    first = _group("a", abstract="Human randomized trial.")
+    second = _group("b", abstract="Human randomized trial.")
+    _groups, _pairs, duplicate_report = apply_duplicate_decisions(
+        [[first], [second]],
+        [first, second],
+        [{"pair_sha256": "0" * 64}],
+        None,
+        campaign_id="test",
+    )
+    assert duplicate_report["candidate_pairs"] == 1
+    assert duplicate_report["unresolved_pairs"] == 1
+    assert duplicate_report["complete"] is False
+    assert duplicate_report["human_verified"] is False
+    assert duplicate_report["report_sha256"] == payload_hash(
+        {
+            key: value
+            for key, value in duplicate_report.items()
+            if key != "report_sha256"
+        }
+    )
+    funnel = build_review_funnel(
+        groups=[first, second],
+        proposals=[
+            _proposal(first, "auto_include"),
+            _proposal(second, "auto_include"),
+        ],
+        features=[_feature(first), _feature(second)],
+        output=tmp_path,
+        duplicate_decision_report=duplicate_report,
+    )
+    assert funnel["gates"]["duplicate_decisions_complete"] is False
+    assert funnel["scientific_synthesis_ready"] is False
 
 
 def test_abstract_queue_fetch_batches_at_two_hundred(tmp_path: Path) -> None:

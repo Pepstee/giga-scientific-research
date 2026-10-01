@@ -652,20 +652,22 @@ def apply_duplicate_decisions(
 ]:
     pair_by_id = {item["pair_sha256"]: item for item in pairs}
     if decisions_document is None:
+        duplicate_report = {
+            "schema_version": DUPLICATE_DECISION_SCHEMA,
+            "candidate_pairs": len(pairs),
+            "decisions_recorded": 0,
+            "same_study": 0,
+            "different_study": 0,
+            "uncertain": 0,
+            "unresolved_pairs": len(pairs),
+            "complete": not pairs,
+            "human_verified": False,
+        }
+        duplicate_report["report_sha256"] = payload_hash(duplicate_report)
         return (
             [list(group) for group in record_groups],
             [dict(pair) for pair in pairs],
-            {
-                "schema_version": DUPLICATE_DECISION_SCHEMA,
-                "candidate_pairs": len(pairs),
-                "decisions_recorded": 0,
-                "same_study": 0,
-                "different_study": 0,
-                "uncertain": 0,
-                "unresolved_pairs": len(pairs),
-                "complete": not pairs,
-                "human_verified": False,
-            },
+            duplicate_report,
         )
     required = {"schema_version", "campaign_id", "pair_set_sha256", "decisions"}
     if not isinstance(decisions_document, Mapping) or set(decisions_document) != required:
