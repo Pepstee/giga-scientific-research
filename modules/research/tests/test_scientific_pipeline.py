@@ -580,6 +580,84 @@ def test_review_state_enforces_actor_boundaries_and_is_idempotent(tmp_path: Path
     assert store.audit()["ok"] is True
 
 
+@pytest.mark.parametrize(
+    ("proposed_state", "override_state"),
+    [
+        ("proposed_exclude", "included"),
+        ("proposed_include", "excluded"),
+    ],
+)
+def test_human_review_can_override_deterministic_proposal(
+    tmp_path: Path, proposed_state: str, override_state: str
+) -> None:
+    store = ScientificReviewStore(tmp_path / "review.sqlite3")
+    campaign_id = "synthetic-review-override"
+    group = "2" * 64
+    evidence = {"source": "synthetic-fixture"}
+    for from_state, to_state in (
+        (None, "discovered"),
+        ("discovered", "triaged"),
+        ("triaged", proposed_state),
+    ):
+        store.transition(
+            campaign_id=campaign_id,
+            group_id=group,
+            from_state=from_state,
+            to_state=to_state,
+            actor_kind="deterministic",
+            reason_codes=["SYNTHETIC_PROPOSAL_TEST"],
+            evidence=evidence,
+            recorded_at=FIXED_TIME,
+        )
+
+    before_refusals = store.counts(campaign_id)
+    before_states = store.current_states(campaign_id)
+    for actor_kind in ("deterministic", "system"):
+        with pytest.raises(ScientificEvidenceError, match="cannot perform"):
+            store.transition(
+                campaign_id=campaign_id,
+                group_id=group,
+                from_state=proposed_state,
+                to_state=override_state,
+                actor_kind=actor_kind,
+                reason_codes=["SYNTHETIC_OVERRIDE_REFUSAL"],
+                evidence=evidence,
+                recorded_at=FIXED_TIME,
+            )
+        assert store.current_states(campaign_id) == before_states
+        assert store.counts(campaign_id) == before_refusals
+
+    event_id, created = store.transition(
+        campaign_id=campaign_id,
+        group_id=group,
+        from_state=proposed_state,
+        to_state=override_state,
+        actor_kind="human",
+        reason_codes=["SYNTHETIC_HUMAN_OVERRIDE_TEST"],
+        evidence=evidence,
+        recorded_at=FIXED_TIME,
+    )
+    assert created is True
+    assert store.current_states(campaign_id)[group] == override_state
+    after_override = store.counts(campaign_id)
+    assert after_override["events"] == before_refusals["events"] + 1
+
+    replayed_event_id, replayed = store.transition(
+        campaign_id=campaign_id,
+        group_id=group,
+        from_state=proposed_state,
+        to_state=override_state,
+        actor_kind="human",
+        reason_codes=["SYNTHETIC_HUMAN_OVERRIDE_TEST"],
+        evidence=evidence,
+        recorded_at=FIXED_TIME,
+    )
+    assert replayed_event_id == event_id
+    assert replayed is False
+    assert store.counts(campaign_id) == after_override
+    assert store.audit()["ok"] is True
+
+
 def test_duplicate_decision_is_append_only_and_conflicts_fail(tmp_path: Path) -> None:
     store = ScientificReviewStore(tmp_path / "review.sqlite3")
     pair = "4" * 64

@@ -41,6 +41,8 @@ TRANSITIONS = {
     ("triaged", "awaiting_review"),
     ("proposed_include", "included"),
     ("proposed_exclude", "excluded"),
+    ("proposed_include", "excluded"),
+    ("proposed_exclude", "included"),
     ("awaiting_review", "included"),
     ("awaiting_review", "excluded"),
     ("included", "fulltext_planned"),
@@ -59,6 +61,8 @@ ACTOR_TRANSITIONS = {
     "human": {
         ("proposed_include", "included"),
         ("proposed_exclude", "excluded"),
+        ("proposed_include", "excluded"),
+        ("proposed_exclude", "included"),
         ("awaiting_review", "included"),
         ("awaiting_review", "excluded"),
         ("fulltext_obtained", "appraised"),
