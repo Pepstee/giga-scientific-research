@@ -2,9 +2,9 @@
 
 Deterministic scientific acquisition and review infrastructure extracted from the GIGA control
 plane. It collects public research records, preserves an append-only evidence trail, compiles and
-executes bounded search campaigns, deduplicates and screens records, manages human review state,
-routes lawful full-text retrieval, measures search saturation, and fails closed before synthesis or
-ranking when required evidence is incomplete.
+executes bounded search campaigns, deduplicates and screens records, manages human review state and
+a bounded automated abstract-review mode, routes lawful full-text retrieval, measures search
+saturation, and fails closed before ranking when required evidence is incomplete.
 
 ## What it provides
 
@@ -48,7 +48,33 @@ A neutral four-phase campaign is provided at
 ## Safety boundary
 
 The module can acquire and structure scientific evidence. It cannot authorize medical treatment,
-publish findings, access personal memory, or act autonomously. Full-text extraction, appraisal,
-comparison, and synthesis remain gated by explicit completeness and human-signoff contracts.
+publish findings, access personal memory, or act autonomously. Automated abstract review can emit
+AI-attributed, source-linked eligibility and descriptive synthesis for an existing retained public
+snapshot; its output is never a human decision. It does not acquire records or authorize full-text
+extraction, risk-of-bias appraisal, effect estimation, ranking, or recommendations. Those steps
+remain gated by their completeness and human-signoff contracts.
+
+### Bounded automated abstract review
+
+An operator-authorized run can use `--review-mode automated` with a hash-bound automated review
+input, the matching protocol, and the duplicate-decision report. Supply the retained groups,
+proposals, and feature files. Choose a new output directory for each run. The retained 18-group
+ArtVault run receipt is
+`/srv/artvault/sandboxes/giga-scientific-research-cycle/run/review-funnel/review-inventory-20260930t1612z/automated-review-20261005/AUTOMATED_REVIEW_RUN.json`;
+its `cwd`, `command_argv`, and input/output hashes bind the actual invocation. To reproduce it,
+reuse those inputs and working directory, set the `RESEARCH_*` input variables to the recorded paths,
+and choose a fresh `RESEARCH_OUTPUT_DIR`.
+
+```bash
+RESEARCH_OUTPUT_DIR="/path/to/a/new/automated-review-output"
+test ! -e "$RESEARCH_OUTPUT_DIR"
+python -m modules.research.core.scientific_pipeline_cli review-funnel \
+  "$RESEARCH_GROUPS" "$RESEARCH_PROPOSALS" "$RESEARCH_FEATURES" \
+  "$RESEARCH_OUTPUT_DIR" \
+  --review-mode automated \
+  --automated-review "$RESEARCH_AUTOMATED_REVIEW_INPUT" \
+  --protocol "$RESEARCH_PROTOCOL" \
+  --duplicate-decision-report "$RESEARCH_DUPLICATE_REPORT"
+```
 
 See [PROVENANCE.md](PROVENANCE.md) for the exact source history.
