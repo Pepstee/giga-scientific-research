@@ -74,6 +74,9 @@ def _decision(group: dict, decision: str = "include") -> dict:
         "group_id": group["group_id"],
         "decision": decision,
         "reason_codes": ["HUMAN_ELIGIBLE"],
+        "reviewer_type": "human",
+        "human_verified": True,
+        "human_attestation": "I personally reviewed the retained title and abstract.",
         "reviewed_by": "reviewer",
         "reviewed_at": FIXED_TIME,
         "abstract_sha256": hashlib.sha256(abstract.encode()).hexdigest(),
@@ -159,6 +162,17 @@ def test_eligibility_decisions_are_bound_to_current_abstract() -> None:
     assert unresolved == []
     document["decisions"][0]["abstract_sha256"] = "0" * 64
     with pytest.raises(ScientificEvidenceError, match="stale"):
+        validate_eligibility_decisions(document, [group])
+
+
+def test_human_eligibility_path_rejects_automated_provenance() -> None:
+    group = _group("a", abstract="Current abstract.")
+    document = _decision_document([group])
+    decision = document["decisions"][0]
+    decision["reviewer_type"] = "ai"
+    decision["human_verified"] = False
+    decision["reviewer"] = {"type": "ai", "model": "GLM-5.3"}
+    with pytest.raises(ScientificEvidenceError, match="explicit human attestation"):
         validate_eligibility_decisions(document, [group])
 
 

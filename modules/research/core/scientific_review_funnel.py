@@ -1,9 +1,8 @@
-"""Deterministic orchestration for staged scientific-paper review.
+"""Orchestrate hash-bound human and automated scientific-paper review stages.
 
-This module connects screening to appraisal without granting abstracts, provider metadata,
-or language models authority to make scientific conclusions.  It creates review queues and
-hash-bound contracts; humans remain responsible for eligibility, full-text extraction,
-risk-of-bias assessment, and synthesis sign-off.
+The legacy funnel keeps its explicit human-attestation and full-text appraisal gates. A
+separate operator-authorised mode can review retained abstracts and create a descriptive
+synthesis while keeping AI provenance explicit and effectiveness claims unauthorised.
 """
 
 from __future__ import annotations
@@ -388,6 +387,24 @@ def validate_eligibility_decisions(
             or not all(isinstance(item, str) and item.strip() for item in reasons)
         ):
             raise ScientificEvidenceError("reason_codes must be a non-empty text array")
+        if (
+            decision.get("reviewer_type") != "human"
+            or decision.get("human_verified") is not True
+        ):
+            raise ScientificEvidenceError(
+                "human eligibility decisions require explicit human attestation"
+            )
+        attestation = _text(
+            decision.get("human_attestation"),
+            "human_attestation",
+            maximum=2_000,
+        )
+        if isinstance(decision.get("reviewer"), Mapping) and str(
+            decision["reviewer"].get("type", "")
+        ).casefold() != "human":
+            raise ScientificEvidenceError(
+                "automated reviewer provenance cannot be accepted as human"
+            )
         reviewer = _text(decision.get("reviewed_by"), "reviewed_by", maximum=500)
         reviewed_at = _timestamp(decision.get("reviewed_at"), "reviewed_at")
         expected_abstract = hashlib.sha256(
@@ -406,6 +423,7 @@ def validate_eligibility_decisions(
             "reviewed_by": reviewer,
             "reviewed_at": reviewed_at,
             "abstract_sha256": recorded_abstract,
+            "human_attestation": attestation,
             "human_verified": True,
         }
     unresolved = sorted(set(groups_by_id) - set(result))
@@ -682,7 +700,9 @@ def build_review_funnel(
         else "replace-with-campaign-id",
         "instructions": (
             "Copy rows from ABSTRACT_SCREENING_QUEUE.csv. Record include/exclude only "
-            "after checking title and abstract; bind each decision to abstract_sha256."
+            "after personally checking title and abstract; bind each decision to "
+            "abstract_sha256 and provide reviewer_type=human, human_verified=true, "
+            "and a human_attestation. Automated review records belong in automated mode."
         ),
         "decisions": [],
     }

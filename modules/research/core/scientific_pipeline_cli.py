@@ -35,6 +35,7 @@ from .scientific_review_funnel import (
     write_pubmed_abstracts,
     write_pubmed_abstract_queue,
 )
+from .scientific_automated_review import build_automated_review_files
 from .scientific_saturation import evaluate_saturation
 from .scientific_screening import (
     compile_screening,
@@ -262,7 +263,44 @@ def _readiness(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
-def _review_funnel(args: argparse.Namespace) -> dict[str, Any]:
+def _review_funnel(
+    args: argparse.Namespace,
+    command_argv: list[str],
+) -> dict[str, Any]:
+    if args.review_mode == "automated":
+        if args.automated_review is None or args.protocol is None:
+            raise ScientificEvidenceError(
+                "automated review requires --automated-review and --protocol"
+            )
+        if args.duplicate_decision_report is None:
+            raise ScientificEvidenceError(
+                "automated review requires the existing --duplicate-decision-report"
+            )
+        if any(
+            value is not None
+            for value in (
+                args.eligibility_decisions,
+                args.extractions,
+                args.synthesis_signoff,
+            )
+        ):
+            raise ScientificEvidenceError(
+                "automated review cannot be combined with human/full-text gate inputs"
+            )
+        return build_automated_review_files(
+            groups=args.groups,
+            proposals=args.proposals,
+            features=args.features,
+            output=args.output,
+            automated_review=args.automated_review,
+            protocol=args.protocol,
+            duplicate_decision_report=args.duplicate_decision_report,
+            command_argv=command_argv,
+        )
+    if args.automated_review is not None or args.protocol is not None:
+        raise ScientificEvidenceError(
+            "--automated-review and --protocol require --review-mode automated"
+        )
     return build_review_funnel_files(
         groups=args.groups,
         proposals=args.proposals,
@@ -543,6 +581,9 @@ def build_parser() -> argparse.ArgumentParser:
     funnel.add_argument("proposals", type=Path)
     funnel.add_argument("features", type=Path)
     funnel.add_argument("output", type=Path)
+    funnel.add_argument("--review-mode", choices=["human", "automated"], default="human")
+    funnel.add_argument("--automated-review", type=Path)
+    funnel.add_argument("--protocol", type=Path)
     funnel.add_argument("--eligibility-decisions", type=Path)
     funnel.add_argument("--extractions", type=Path)
     funnel.add_argument("--duplicate-decision-report", type=Path)
@@ -640,7 +681,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    cli_args = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(cli_args)
+    command_argv = [
+        sys.executable,
+        "-B",
+        "-m",
+        "modules.research.core.scientific_pipeline_cli",
+        *cli_args,
+    ]
     try:
         if args.command == "compile-search":
             result = _compile_search(args)
@@ -657,7 +706,7 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "readiness":
             result = _readiness(args)
         elif args.command == "review-funnel":
-            result = _review_funnel(args)
+            result = _review_funnel(args, command_argv)
         elif args.command == "fetch-pubmed-abstracts":
             result = _fetch_abstracts(args)
         elif args.command == "merge-abstracts":
