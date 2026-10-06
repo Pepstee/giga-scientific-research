@@ -11,6 +11,7 @@ from typing import Any, Mapping, Sequence
 
 from .scientific_evidence import ScientificEvidenceError, payload_hash
 from .scientific_review_funnel import (
+    PMID_RE,
     _artifact,
     _clean_abstract,
     _json,
@@ -114,6 +115,35 @@ def _independent_review(
     }
 
 
+def _validate_abstract_enrichment(
+    enrichment: Any, group: Mapping[str, Any], group_id: str
+) -> None:
+    field = f"source group {group_id} abstract_enrichment"
+    values = _fields(
+        enrichment,
+        {"provider", "pmid", "retrieval_sha256", "abstract_sha256", "authority"},
+        field,
+    )
+    _text(values.get("provider"), f"{field}.provider", maximum=200)
+    pmid = _text(values.get("pmid"), f"{field}.pmid", maximum=12)
+    if not PMID_RE.fullmatch(pmid):
+        raise ScientificEvidenceError(f"{field}.pmid is not a valid identifier")
+    group_pmid = _text(group.get("pmid"), f"{field}.group_pmid", maximum=12)
+    if not PMID_RE.fullmatch(group_pmid) or pmid != group_pmid:
+        raise ScientificEvidenceError(f"{field}.pmid does not match the group identifier")
+    _sha(values.get("retrieval_sha256"), f"{field}.retrieval_sha256")
+    abstract = _clean_abstract(group.get("abstract"))
+    if abstract is None:
+        raise ScientificEvidenceError(f"source group {group_id} enriched abstract is empty")
+    abstract_sha256 = _sha(values.get("abstract_sha256"), f"{field}.abstract_sha256")
+    if abstract_sha256 != hashlib.sha256(abstract.encode("utf-8")).hexdigest():
+        raise ScientificEvidenceError(
+            f"{field}.abstract_sha256 does not match the retained abstract"
+        )
+    if values.get("authority") != "eligibility_metadata_only":
+        raise ScientificEvidenceError(f"{field}.authority is invalid")
+
+
 def validate_automated_review(
     document: Mapping[str, Any],
     *,
@@ -160,8 +190,11 @@ def validate_automated_review(
         )
         group_material = dict(group)
         group_material.pop("group_payload_sha256")
-        group_material.pop("screening_priority", None)
-        group_material.pop("priority_reason_codes", None)
+        if "abstract_enrichment" in group:
+            _validate_abstract_enrichment(group["abstract_enrichment"], group, group_id)
+        else:
+            group_material.pop("screening_priority", None)
+            group_material.pop("priority_reason_codes", None)
         if payload_hash(group_material) != recorded_group_hash:
             raise ScientificEvidenceError(f"source group {group_id} payload hash mismatch")
         urls = group.get("urls")

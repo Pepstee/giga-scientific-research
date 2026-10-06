@@ -13,6 +13,10 @@ from modules.research.core.scientific_automated_review import (
     validate_automated_review,
 )
 from modules.research.core.scientific_evidence import ScientificEvidenceError, payload_hash
+from modules.research.core.scientific_review_funnel import (
+    ABSTRACT_RETRIEVAL_SCHEMA,
+    apply_abstract_enrichments,
+)
 
 
 def _group(marker: str, abstract: str | None) -> dict:
@@ -158,6 +162,182 @@ def _validate(paths: dict, document: dict) -> dict:
         source_groups_sha256=hashlib.sha256(paths["groups"].read_bytes()).hexdigest(),
         source_protocol_sha256=hashlib.sha256(paths["protocol"].read_bytes()).hexdigest(),
     )
+
+
+def _rehash_group(group: dict) -> None:
+    material = dict(group)
+    material.pop("group_payload_sha256", None)
+    group["group_payload_sha256"] = payload_hash(material)
+
+
+def _resync(paths: dict, document: dict, *, build: dict | None = None) -> None:
+    groups = paths["groups_value"]
+    paths["groups"].write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in groups),
+        encoding="utf-8",
+    )
+    if build is not None:
+        for key in ("proposals", "features"):
+            paths[key].write_text(
+                "".join(
+                    json.dumps(item, ensure_ascii=False) + "\n" for item in build[key]
+                ),
+                encoding="utf-8",
+            )
+    document["source_groups_sha256"] = hashlib.sha256(
+        paths["groups"].read_bytes()
+    ).hexdigest()
+    document["reviews"] = [
+        _review(groups[0], decision="include"),
+        _review(groups[1], decision="uncertain"),
+    ]
+    _rehash(document)
+    paths["document"] = document
+    paths["review"].write_text(
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+
+def _enriched_fixture(tmp_path: Path) -> dict:
+    paths = _fixture(tmp_path)
+    groups = copy.deepcopy(paths["groups_value"])
+    for group, pmid in zip(groups, ("87654321", "12345678"), strict=True):
+        group["pmid"] = pmid
+        group["publication_types"] = ["Journal Article"]
+        group["query_ids"] = ["Q1"]
+        group["negative_control"] = False
+        group["compiled_query_retrieval"] = True
+        group["retracted"] = False
+        material = dict(group)
+        material.pop("group_payload_sha256", None)
+        material.pop("screening_priority", None)
+        material.pop("priority_reason_codes", None)
+        group["group_payload_sha256"] = payload_hash(material)
+
+    abstract = "Surface treatment improved conversion efficiency in a perovskite solar cell."
+    retrieval = {
+        "schema_version": ABSTRACT_RETRIEVAL_SCHEMA,
+        "provider": "synthetic-provider",
+        "pmid": "12345678",
+        "abstract": abstract,
+        "retrieval_sha256": hashlib.sha256(b"synthetic retrieval receipt").hexdigest(),
+    }
+    ontology = {
+        "conditions": {
+            "perovskite_solar_cell": {
+                "terms": ["perovskite solar cell"],
+                "subject_headings": [],
+            }
+        },
+        "interventions": {
+            "surface_treatment": {"terms": ["surface treatment"], "subject_headings": []}
+        },
+        "outcomes": {
+            "conversion_efficiency": {
+                "terms": ["conversion efficiency"],
+                "subject_headings": [],
+            }
+        },
+    }
+    specification = {
+        "queries": [
+            {
+                "id": "Q1",
+                "condition_concepts": ["perovskite_solar_cell"],
+                "intervention_concepts": ["surface_treatment"],
+                "outcome_concepts": ["conversion_efficiency"],
+                "require_outcomes": False,
+                "extra_required_groups": [],
+                "negative_control": False,
+            }
+        ],
+        "negative_controls": [],
+    }
+    build = apply_abstract_enrichments(groups, [retrieval], ontology, specification)
+    assert build["report"]["applied"] == 1
+    paths["groups_value"] = build["groups"]
+    _resync(paths, paths["document"], build=build)
+    return paths
+
+
+def test_automated_review_accepts_legacy_and_producer_enriched_priority_groups(
+    tmp_path: Path,
+) -> None:
+    paths = _enriched_fixture(tmp_path)
+    groups = paths["groups_value"]
+    assert "abstract_enrichment" not in groups[0]
+    assert "abstract_enrichment" in groups[1]
+    enriched_material = dict(groups[1])
+    enriched_material.pop("group_payload_sha256")
+    assert groups[1]["group_payload_sha256"] == payload_hash(enriched_material)
+    assert _validate(paths, paths["document"]) is not None
+
+
+def test_automated_review_rejects_stale_enrichment_abstract_hash(tmp_path: Path) -> None:
+    paths = _enriched_fixture(tmp_path)
+    enriched = paths["groups_value"][1]
+    enriched["abstract_enrichment"]["abstract_sha256"] = hashlib.sha256(
+        b"stale abstract"
+    ).hexdigest()
+    _rehash_group(enriched)
+    _resync(paths, paths["document"])
+    with pytest.raises(ScientificEvidenceError, match="abstract_enrichment"):
+        _validate(paths, paths["document"])
+
+
+@pytest.mark.parametrize("malformed", [None, {"provider": "synthetic-provider"}])
+def test_automated_review_rejects_null_or_malformed_enrichment_without_fallback(
+    tmp_path: Path, malformed: dict | None
+) -> None:
+    paths = _enriched_fixture(tmp_path)
+    enriched = paths["groups_value"][1]
+    enriched["abstract_enrichment"] = malformed
+    _rehash_group(enriched)
+    _resync(paths, paths["document"])
+    with pytest.raises(ScientificEvidenceError, match="abstract_enrichment"):
+        _validate(paths, paths["document"])
+
+
+@pytest.mark.parametrize(
+    "bad_metadata",
+    ["missing_provider", "retrieval_hash", "invalid_pmid", "pmid", "authority"],
+)
+def test_automated_review_requires_complete_bound_enrichment_metadata(
+    tmp_path: Path, bad_metadata: str
+) -> None:
+    paths = _enriched_fixture(tmp_path)
+    enriched = paths["groups_value"][1]
+    metadata = dict(enriched["abstract_enrichment"])
+    if bad_metadata == "missing_provider":
+        metadata.pop("provider")
+    elif bad_metadata == "retrieval_hash":
+        metadata["retrieval_sha256"] = "not-a-sha256"
+    elif bad_metadata == "invalid_pmid":
+        metadata["pmid"] = "not-a-pmid"
+    elif bad_metadata == "pmid":
+        metadata["pmid"] = "87654321"
+    else:
+        metadata["authority"] = "full_text_or_effectiveness"
+    enriched["abstract_enrichment"] = metadata
+    _rehash_group(enriched)
+    _resync(paths, paths["document"])
+    with pytest.raises(ScientificEvidenceError, match="abstract_enrichment"):
+        _validate(paths, paths["document"])
+
+
+def test_automated_review_rejects_enriched_hash_omitting_priority_fields(
+    tmp_path: Path,
+) -> None:
+    paths = _enriched_fixture(tmp_path)
+    enriched = paths["groups_value"][1]
+    material = dict(enriched)
+    material.pop("group_payload_sha256")
+    material.pop("screening_priority", None)
+    material.pop("priority_reason_codes", None)
+    enriched["group_payload_sha256"] = payload_hash(material)
+    _resync(paths, paths["document"])
+    with pytest.raises(ScientificEvidenceError, match="payload hash mismatch"):
+        _validate(paths, paths["document"])
 
 
 def test_real_cli_accepts_complete_ai_provenance_and_keeps_scope_flags_false(
